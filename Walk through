@@ -1,0 +1,60 @@
+build image: 
+sudo docker build --tag jwt-api-test .
+
+run image locally:
+sudo docker run -p 127.0.0.1:80:8080 --env-file=env_file jwt-api-test
+
+test image:
+export TOKEN=`curl -d '{"email":"<EMAIL>","password":"<PASSWORD>"}' -H "Content-Type: application/json" -X POST localhost:80/auth  | jq -r '.token'`
+curl --request GET 'http://127.0.0.1:80/contents' -H "Authorization: Bearer ${TOKEN}" | jq .
+
+## make sure of region and roles
+aws configure list
+
+create cluster:
+eksctl create cluster --name simple-jwt-api
+
+After creating the cluster:
+aws eks update-kubeconfig --region us-west-2 --name simple-jwt-api
+eksctl utils write-kubeconfig --region us-west-2 --name simple-jwt-api
+
+Role:
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+TRUST="{ \"Version\": \"2012-10-17\", \"Statement\": [ { \"Effect\": \"Allow\", \"Principal\": { \"AWS\": \"arn:aws:iam::${ACCOUNT_ID}:root\" }, \"Action\": \"sts:AssumeRole\" } ] }"
+aws iam create-role --role-name UdacityFlaskDeployCBKubectlRole --assume-role-policy-document "$TRUST" --output text --query 'Role.Arn'
+echo '{ "Version": "2012-10-17", "Statement": [ { "Effect": "Allow", "Action": [ "eks:Describe*", "ssm:GetParameters" ], "Resource": "*" } ] }' > ./iam-role-policy 
+aws iam put-role-policy --role-name UdacityFlaskDeployCBKubectlRole --policy-name eks-describe --policy-document file://./iam-role-policy
+aws iam attach-role-policy --role-name UdacityFlaskDeployCBKubectlRole --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+aws iam attach-role-policy --role-name UdacityFlaskDeployCBKubectlRole --policy-arn arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess
+
+config map:
+kubectl get -n kube-system configmap/aws-auth -o yaml > ./aws-auth-patch.yml
+    - rolearn: arn:aws:iam::118102576004:role/UdacityFlaskDeployCBKubectlRole
+      username: build
+      groups:
+        - system:masters
+kubectl patch configmap/aws-auth -n kube-system --patch "$(cat ./aws-auth-patch.yml)"
+
+Modoifiy buildspec.yml file:
+env:
+  parameter-store:         
+    JWT_SECRET: JWT_SECRET
+
+Store secret in aws parameter store:
+aws ssm put-parameter --name JWT_SECRET --value "YourJWTSecret" --type SecureString
+
+Modifiy ci-cd-codepipeline.cfn.yml:
+- EksClusterName : use the name of the EKS cluster you created above
+- GitSourceRepo : use the name of your project's github repo.
+- GitHubUser : use your github user name
+- KubectlRoleName : use the name of the role you created for kubectl above
+
+Create stack online for codepipeline:
+	using token and ci-cd-codepipeline.cfn.yml
+	token : ba7a******************************
+
+if pipeline works test api endpoint:
+IN terminal: kubectl get services simple-jwt-api -o wide
+export URL="a9b5d08786eff47c795957687bdcd96b-639526500.us-west-2.elb.amazonaws.com"
+export TOKEN=`curl -d '{"email":"test@test.com","password":"test"}' -H "Content-Type: application/json" -X POST $URL/auth  | jq -r '.token'`
+curl --request GET $URL:80/contents -H "Authorization: Bearer ${TOKEN}" | jq
